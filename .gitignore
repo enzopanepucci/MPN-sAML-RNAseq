@@ -1,0 +1,9 @@
+# Generated results and checkpoints are distributed in the ZIP, but not committed.
+/outputs/
+/checkpoints/
+.Rhistory
+.RData
+.Ruserdata
+.Rproj.user/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,1261 @@
+library(DESeq2)
+library(dplyr)
+library(tibble)
+library(biomaRt)
+
+# ============================================================
+# 1. EDITAR col_data
+# ============================================================
+
+col_data$sample <- rownames(col_data)
+
+# Guardar o Condition original, porque vamos trocar o Condition para labels bonitos
+col_data$Condition_original <- as.character(col_data$Condition)
+col_data$Patient_ID <- as.character(col_data$Patient_ID)
+
+# Identificar progressors e non-progressors
+col_data$Progression_Group <- ifelse(
+  grepl("^NP", col_data$Patient_ID),
+  "Non-progressor",
+  "Progressor"
+)
+
+# Criar Condition bonito para heatmap/anotação
+col_data$Condition_heatmap <- case_when(
+  col_data$Progression_Group == "Progressor" &
+    col_data$Condition_original == "pre" ~ "Pre-leukemic progression",
+  
+  col_data$Progression_Group == "Progressor" &
+    col_data$Condition_original == "pos" ~ "Post-leukemic progression",
+  
+  col_data$Progression_Group == "Non-progressor" &
+    col_data$Condition_original == "pre" ~ "First sample",
+  
+  col_data$Progression_Group == "Non-progressor" &
+    col_data$Condition_original == "pos" ~ "Second sample",
+  
+  TRUE ~ NA_character_
+)
+
+# Sobrescrever Condition com o label bonito
+col_data$Condition <- factor(
+  col_data$Condition_heatmap,
+  levels = c(
+    "Pre-leukemic progression",
+    "Post-leukemic progression",
+    "First sample",
+    "Second sample"
+  )
+)
+
+# Criar Condition específico para DESeq2
+# Apenas progressors entram no DESeq2
+col_data$Condition_DESeq <- case_when(
+  col_data$Progression_Group == "Progressor" &
+    col_data$Condition_original == "pre" ~ "pre",
+  
+  col_data$Progression_Group == "Progressor" &
+    col_data$Condition_original %in% c("pos", "post") ~ "pos",
+  
+  TRUE ~ NA_character_
+)
+
+# Conferir
+print(table(col_data$Progression_Group, col_data$Condition, useNA = "ifany"))
+print(table(col_data$Progression_Group, col_data$Condition_DESeq, useNA = "ifany"))
+
+
+samples_use <- rownames(col_data)[rownames(col_data) %in% colnames(merged_counts)]
+
+col_data <- col_data[samples_use, , drop = FALSE]
+merged_counts_full <- merged_counts[, rownames(col_data), drop = FALSE]
+
+stopifnot(all(colnames(merged_counts_full) == rownames(col_data)))
+
+cat("Dimensão inicial:\n")
+print(dim(merged_counts_full))
+
+to_remove <- c(
+  "__no_feature",
+  "__ambiguous",
+  "__not_aligned",
+  "__alignment_not_unique"
+)
+
+counts_clean <- merged_counts_full[!rownames(merged_counts_full) %in% to_remove, , drop = FALSE]
+
+
+col_data_prog <- col_data %>%
+  filter(Progression_Group == "Progressor") %>%
+  as.data.frame()
+
+rownames(col_data_prog) <- col_data_prog$sample
+
+col_data_prog <- col_data_prog[!is.na(col_data_prog$Condition_DESeq), , drop = FALSE]
+
+counts_prog_raw <- counts_clean[, rownames(col_data_prog), drop = FALSE]
+
+stopifnot(all(colnames(counts_prog_raw) == rownames(col_data_prog)))
+
+
+min_count <- 10
+min_samples <- 6
+
+genes_a_manter <- rowSums(counts_prog_raw >= min_count) >= min_samples
+
+cat("Genes antes do filtro:\n")
+print(nrow(counts_clean))
+
+cat("Genes mantidos pelo filtro nos progressors:\n")
+print(sum(genes_a_manter))
+
+# Aplica o filtro na matriz completa, incluindo NP
+counts_filtered <- counts_clean[genes_a_manter, , drop = FALSE]
+
+cat("Dimensão após filtro de expressão:\n")
+print(dim(counts_filtered))
+
+
+library(biomaRt)
+library(dplyr)
+
+message("Removendo genes dos cromossomos sexuais...")
+
+gene_ids_clean <- sub("\\..*$", "", rownames(counts_filtered))
+
+ensembl <- useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+
+gene_chr <- getBM(
+  attributes = c(
+    "ensembl_gene_id",
+    "external_gene_name",
+    "chromosome_name"
+  ),
+  filters = "ensembl_gene_id",
+  values = unique(gene_ids_clean),
+  mart = ensembl
+)
+
+genes_XY <- gene_chr %>%
+  filter(chromosome_name %in% c("X", "Y")) %>%
+  distinct(ensembl_gene_id, .keep_all = TRUE)
+
+ensembl_ids_xy <- genes_XY$ensembl_gene_id
+
+counts_noXY <- counts_filtered[!gene_ids_clean %in% ensembl_ids_xy, , drop = FALSE]
+
+cat("Dimensão após remover X/Y:\n")
+print(dim(counts_noXY))
+
+
+
+counts_prog <- counts_noXY[, rownames(col_data_prog), drop = FALSE]
+
+stopifnot(all(colnames(counts_prog) == rownames(col_data_prog)))
+
+col_data_prog$Patient_ID <- factor(col_data_prog$Patient_ID)
+
+col_data_prog$Condition_DESeq <- factor(
+  col_data_prog$Condition_DESeq,
+  levels = c("pre", "pos")
+)
+
+dds_noXY_prog <- DESeqDataSetFromMatrix(
+  countData = counts_prog,
+  colData = col_data_prog,
+  design = ~ Patient_ID + Condition_DESeq
+)
+
+dds_noXY_prog$Condition_DESeq <- relevel(dds_noXY_prog$Condition_DESeq, ref = "pre")
+
+dds_noXY_prog <- DESeq(dds_noXY_prog)
+
+res_noXY <- results(
+  dds_noXY_prog,
+  contrast = c("Condition_DESeq", "pos", "pre")
+)
+
+res_noXY_df <- as.data.frame(res_noXY)
+
+significant_degs <- res_noXY_df %>%
+  filter(padj < 0.05 & !is.na(padj))
+
+ensembl_ids_degs <- rownames(significant_degs)
+
+cat("DEGs significativos:\n")
+print(nrow(significant_degs))
+
+library(dplyr)
+library(tibble)
+library(ggplot2)
+library(pheatmap)
+library(biomaRt)
+
+res_noXY_df$Ensembl_ID_original <- rownames(res_noXY_df)
+
+# Conecta no Ensembl
+ensembl <- useMart(
+  "ensembl",
+  dataset = "hsapiens_gene_ensembl"
+)
+
+# Busca GeneSymbol
+gene_symbols <- getBM(
+  attributes = c(
+    "ensembl_gene_id",
+    "external_gene_name"
+  ),
+  filters = "ensembl_gene_id",
+  values = unique(res_noXY_df$Ensembl_ID),
+  mart = ensembl
+)
+
+# Renomear para o nome que você quer
+gene_symbols <- gene_symbols %>%
+  dplyr::rename(
+    Ensembl_ID = ensembl_gene_id,
+    GeneSymbol = external_gene_name
+  ) %>%
+  dplyr::distinct(Ensembl_ID, .keep_all = TRUE)
+
+res_noXY_df$gene_symbol <- gene_symbols$GeneSymbol[match(sub("\\..*$", "", rownames(res_noXY_df)), gene_symbols$Ensembl_ID)]
+
+
+# ============================================================
+# 2. VOLCANO PLOT
+# ============================================================
+
+padj_cutoff <- 0.05
+lfc_cutoff <- 0.5
+
+volcano_df <- res_noXY_df %>%
+  mutate(
+    padj_for_plot = ifelse(is.na(padj), NA, pmax(padj, .Machine$double.xmin)),
+    neg_log10_padj = -log10(padj_for_plot),
+    
+    Volcano_category = case_when(
+      is.na(padj) ~ "Not tested",
+      
+      padj < padj_cutoff & log2FoldChange >= lfc_cutoff ~
+        "Upregulated in post-leukemic progression",
+      
+      padj < padj_cutoff & log2FoldChange <= -lfc_cutoff ~
+        "Downregulated in post-leukemic progression",
+      
+      padj < padj_cutoff & abs(log2FoldChange) < lfc_cutoff ~
+        "Statistically significant, small effect",
+      
+      padj >= padj_cutoff & log2FoldChange >= 0 ~
+        "Post-side, not significant",
+      
+      padj >= padj_cutoff & log2FoldChange < 0 ~
+        "Pre-side, not significant",
+      
+      TRUE ~ "Not tested"
+    )
+  )
+
+volcano_colors <- c(
+  "Upregulated in post-leukemic progression" = "#B2182B",
+  "Downregulated in post-leukemic progression" = "#2166AC",
+  "Statistically significant, small effect" = "#7B3294",
+  "Post-side, not significant" = "#F4A3A8",
+  "Pre-side, not significant" = "#92C5DE",
+  "Not tested" = "#BDBDBD"
+)
+
+# Genes para rotular: mais significativos e com maior efeito
+label_genes <- volcano_df %>%
+  filter(
+    !is.na(padj),
+    padj < padj_cutoff,
+    abs(log2FoldChange) >= 1
+  ) %>%
+  arrange(padj) %>%
+  slice_head(n = 20)
+
+p_volcano <- ggplot(
+  volcano_df,
+  aes(
+    x = log2FoldChange,
+    y = neg_log10_padj,
+    color = Volcano_category
+  )
+) +
+  geom_point(alpha = 0.75, size = 1.8) +
+  geom_vline(
+    xintercept = c(-lfc_cutoff, lfc_cutoff),
+    linetype = "dashed",
+    linewidth = 0.4,
+    color = "grey35"
+  ) +
+  geom_hline(
+    yintercept = -log10(padj_cutoff),
+    linetype = "dashed",
+    linewidth = 0.4,
+    color = "grey35"
+  ) +
+  scale_color_manual(values = volcano_colors) +
+  labs(
+    title = "Differential expression during leukemic progression",
+    subtitle = "Paired DESeq2 analysis: post-leukemic progression versus pre-leukemic progression in progressors only",
+    x = expression(log[2]~fold~change~"(Post-leukemic / Pre-leukemic)"),
+    y = expression(-log[10]~adjusted~italic(P)~value),
+    color = "Gene category"
+  ) +
+  theme_classic(base_size = 13) +
+  theme(
+    plot.title = element_text(face = "bold", size = 15),
+    plot.subtitle = element_text(size = 11),
+    legend.title = element_text(face = "bold"),
+    legend.position = "right"
+  )
+
+if (requireNamespace("ggrepel", quietly = TRUE)) {
+  p_volcano <- p_volcano +
+    ggrepel::geom_text_repel(
+      data = label_genes,
+      aes(label = gene_symbol),
+      size = 3,
+      max.overlaps = 40,
+      box.padding = 0.4,
+      point.padding = 0.2,
+      show.legend = FALSE
+    )
+}
+
+print(p_volcano)
+
+ggsave(
+  filename = "volcano_progression_DESeq2.pdf",
+  plot = p_volcano,
+  width = 9,
+  height = 7
+)
+
+ggsave(
+  filename = "volcano_progression_DESeq2.png",
+  plot = p_volcano,
+  width = 9,
+  height = 7,
+  dpi = 300
+)
+
+# ============================================================
+# 3. PEGAR DEGs E CRIAR matrix_for_heatmap COM GENE SYMBOL
+# ============================================================
+
+degs_annotated <- res_noXY_df %>%
+  filter(
+    !is.na(padj),
+    padj < padj_cutoff,
+    abs(log2FoldChange) > lfc_cutoff,
+    !is.na(gene_symbol),
+    gene_symbol != ""
+  ) %>%
+  arrange(padj) %>%
+  distinct(gene_symbol, .keep_all = TRUE)
+
+cat("Número de DEGs anotados com gene symbol:\n")
+print(nrow(degs_annotated))
+
+# Match robusto entre Ensembl IDs do resultado e da matriz VST
+norm_ids_original <- rownames(normalized_counts_all)
+norm_ids_clean <- sub("\\..*$", "", norm_ids_original)
+
+match_idx <- match(degs_annotated$Ensembl_ID_original, norm_ids_clean)
+
+degs_for_heatmap <- degs_annotated[!is.na(match_idx), , drop = FALSE]
+match_idx <- match_idx[!is.na(match_idx)]
+
+matrix_for_heatmap <- normalized_counts_all[match_idx, , drop = FALSE]
+
+# Rownames agora serão gene symbols
+rownames(matrix_for_heatmap) <- degs_for_heatmap$gene_symbol
+
+cat("Dimensão de matrix_for_heatmap:\n")
+print(dim(matrix_for_heatmap))
+
+# ============================================================
+# 4. ORGANIZAR COLUNAS E ANNOTATIONS
+# ============================================================
+
+col_data$sample <- rownames(col_data)
+
+# Garantir fatores na ordem certa
+col_data$Progression_Group <- factor(
+  col_data$Progression_Group,
+  levels = c("Progressor", "Non-progressor")
+)
+
+col_data$Condition <- factor(
+  col_data$Condition,
+  levels = c(
+    "Pre-leukemic progression",
+    "Post-leukemic progression",
+    "First sample",
+    "Second sample"
+  )
+)
+
+# Usar apenas amostras presentes na matriz
+col_data_hm <- col_data[colnames(matrix_for_heatmap), , drop = FALSE]
+
+# Ordenar colunas
+col_data_hm <- col_data_hm[
+  order(
+    col_data_hm$Progression_Group,
+    col_data_hm$Condition,
+    col_data_hm$Patient_ID
+  ),
+  ,
+  drop = FALSE
+]
+
+sample_order <- rownames(col_data_hm)
+
+matrix_for_heatmap <- matrix_for_heatmap[, sample_order, drop = FALSE]
+
+# Annotation do topo
+annotation_col <- data.frame(
+  Progression_status = col_data_hm$Progression_Group,
+  Sampling_point = col_data_hm$Condition
+)
+
+rownames(annotation_col) <- rownames(col_data_hm)
+
+# Cores com significado biológico
+annotation_colors <- list(
+  Progression_status = c(
+    "Progressor" = "#7F0000",
+    "Non-progressor" = "#08519C"
+  ),
+  
+  Sampling_point = c(
+    "Pre-leukemic progression" = "#9ECAE1",
+    "Post-leukemic progression" = "#CB181D",
+    "First sample" = "#BDBDBD",
+    "Second sample" = "#525252"
+  )
+)
+
+# Gaps entre blocos de amostras
+sample_blocks <- paste(
+  annotation_col$Progression_status,
+  annotation_col$Sampling_point,
+  sep = "_"
+)
+
+gaps_col <- which(sample_blocks[-1] != sample_blocks[-length(sample_blocks)])
+
+print(annotation_col)
+print(gaps_col)
+
+
+# ============================================================
+# 5. HEATMAP DE TODOS OS DEGs
+# ============================================================
+
+scaled_matrix_all_degs <- t(scale(t(matrix_for_heatmap)))
+scaled_matrix_all_degs[is.na(scaled_matrix_all_degs)] <- 0
+
+heatmap_colors <- colorRampPalette(
+  c("#2166AC", "#F7F7F7", "#B2182B")
+)(101)
+
+pheatmap(
+  scaled_matrix_all_degs,
+  color = heatmap_colors,
+  annotation_col = annotation_col,
+  annotation_colors = annotation_colors,
+  gaps_col = gaps_col,
+  cluster_rows = TRUE,
+  cluster_cols = FALSE,
+  show_rownames = ifelse(nrow(scaled_matrix_all_degs) <= 80, TRUE, FALSE),
+  show_colnames = TRUE,
+  fontsize_row = 6,
+  fontsize_col = 8,
+  border_color = NA,
+  main = "Differentially expressed genes during leukemic progression",
+  filename = "heatmap_all_DEGs_progressors_and_nonprogressors.pdf",
+  width = 11,
+  height = 10
+)
+
+pheatmap(
+  scaled_matrix_all_degs,
+  color = heatmap_colors,
+  annotation_col = annotation_col,
+  annotation_colors = annotation_colors,
+  gaps_col = gaps_col,
+  cluster_rows = TRUE,
+  cluster_cols = FALSE,
+  show_rownames = ifelse(nrow(scaled_matrix_all_degs) <= 80, TRUE, FALSE),
+  show_colnames = TRUE,
+  fontsize_row = 6,
+  fontsize_col = 8,
+  border_color = NA,
+  main = "Differentially expressed genes during leukemic progression"
+)
+
+
+# ============================================================
+# 6. HEATMAP ORGANIZADO POR BIOLOGICAL FUNCTION
+# ============================================================
+
+gene_to_module <- stack(gene_modules)
+colnames(gene_to_module) <- c("Gene", "Module")
+
+gene_to_module <- gene_to_module %>%
+  distinct(Gene, .keep_all = TRUE)
+
+genes_module_degs <- gene_to_module %>%
+  filter(Gene %in% rownames(matrix_for_heatmap))
+
+cat("DEGs presentes em gene_modules:\n")
+print(nrow(genes_module_degs))
+
+print(genes_module_degs)
+
+if (nrow(genes_module_degs) == 0) {
+  stop("Nenhum DEG encontrado dentro de gene_modules.")
+}
+
+# Manter ordem dos módulos como definida em gene_modules
+genes_module_degs$Module <- factor(
+  genes_module_degs$Module,
+  levels = names(gene_modules)
+)
+
+genes_module_degs <- genes_module_degs %>%
+  arrange(Module)
+
+matrix_biological_function <- matrix_for_heatmap[
+  genes_module_degs$Gene,
+  ,
+  drop = FALSE
+]
+
+scaled_matrix_biological_function <- t(scale(t(matrix_biological_function)))
+scaled_matrix_biological_function[is.na(scaled_matrix_biological_function)] <- 0
+
+annotation_row <- data.frame(
+  Biological_function = genes_module_degs$Module
+)
+
+rownames(annotation_row) <- genes_module_degs$Gene
+
+# Gaps entre módulos
+module_vector <- annotation_row$Biological_function
+gaps_row <- which(module_vector[-1] != module_vector[-length(module_vector)])
+
+module_colors <- c(
+  "1. Myeloid identity loss" = "#8C510A",
+  "2. Myeloid sensors and effectors" = "#01665E",
+  "3. Cytokines and chemokines" = "#542788",
+  "4. Adhesion, migration and antigen presentation" = "#4D4D4D",
+  "5. Malignant proliferation and DNA repair" = "#B2182B",
+  "6. Paradoxical oncogenes" = "#762A83",
+  "7. Survival and RNA metabolism" = "#1B7837"
+)
+
+annotation_colors_bio <- annotation_colors
+annotation_colors_bio$Biological_function <- module_colors
+
+pheatmap(
+  scaled_matrix_biological_function,
+  color = heatmap_colors,
+  annotation_col = annotation_col,
+  annotation_row = annotation_row,
+  annotation_colors = annotation_colors_bio,
+  gaps_col = gaps_col,
+  gaps_row = gaps_row,
+  cluster_rows = FALSE,
+  cluster_cols = FALSE,
+  show_rownames = TRUE,
+  show_colnames = TRUE,
+  fontsize_row = 7,
+  fontsize_col = 8,
+  border_color = NA,
+  main = "DEGs organized by biological function",
+  filename = "heatmap_DEGs_biological_function_progressors_and_nonprogressors.pdf",
+  width = 13,
+  height = 11
+)
+
+library(pheatmap)
+library(grid)
+
+# Fecha dispositivos gráficos travados, se houver
+graphics.off()
+
+# Cria o heatmap como objeto
+p_bio <- pheatmap(
+  scaled_matrix_biological_function,
+  color = heatmap_colors,
+  annotation_col = annotation_col,
+  annotation_row = annotation_row,
+  annotation_colors = annotation_colors_bio,
+  gaps_col = gaps_col,
+  gaps_row = gaps_row,
+  cluster_rows = FALSE,
+  cluster_cols = FALSE,
+  show_rownames = TRUE,
+  show_colnames = TRUE,
+  fontsize_row = 7,
+  fontsize_col = 8,
+  border_color = NA,
+  main = "DEGs organized by biological function",
+  silent = TRUE
+)
+
+# Força aparecer no Plots
+grid::grid.newpage()
+grid::grid.draw(p_bio$gtable)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+library(pheatmap)
+
+# ============================================================
+# HEATMAP SIMPLES
+# Usa apenas:
+#   matrix_df_annotated: matriz normalizada, rownames = geneSymbol
+#   col_data_df: sample, Condition, Patient_ID
+# ============================================================
+
+# ----------------------------
+# 1. Renomear grupos
+# ----------------------------
+col_data_filtered$samples <- rownames(col_data_filtered)
+
+col_data_filtered$Condition <- ifelse(
+  col_data_filtered$Condition == "pre",
+  "Pre-leukemic progression",
+  ifelse(
+    col_data_filtered$Condition == "pos",
+    "Post-leukemic progression",
+    NA
+  )
+)
+col_data_filtered$Condition <- factor(
+  col_data_filtered$Condition,
+  levels = c("Pre-leukemic progression", "Post-leukemic progression")
+)
+col_data_df <- col_data_filtered
+
+# ----------------------------
+# 2. Genes organizados por módulos da discussão
+# ----------------------------
+
+gene_modules <- list(
+  "1. Myeloid identity loss" = c(
+    "IRF8", "KLF4", "MAFB", "VDR", "RXRA", "NR4A1",
+    "CEBPD", "BCL6", "RUNX1", "ETV5", "HOXC4", "UHRF1"
+  ),
+  
+  "2. Myeloid sensors and effectors" = c(
+    "TLR1", "TLR4", "TLR5", "NOD2",
+    "FCGR3A", "FCGR2A", "FCGR1A", "FCAR",
+    "CD14", "CD36", "MSR1",
+    "LYZ", "ALOX5", "S100A8", "S100A9", "S100A12",
+    "C3", "C3AR1"
+  ),
+  
+  "3. Cytokines and chemokines" = c(
+    "IFNG", "IL1B", "TNFSF10",
+    "CCL2", "CCL8", "CXCL10", "CXCL5"
+  ),
+  
+  "4. Adhesion, migration and antigen presentation" = c(
+    "CCR2", "CX3CR1", "CCR1", "CCR5",
+    "ICAM1", "VCAM1", "ITGAM", "ITGAX", "ITGB2",
+    "JAKMIP1",
+    "HLA-DRA", "HLA-DRB1", "CD86", "CD40"
+  ),
+  
+  "5. Malignant proliferation and DNA repair" = c(
+    "FLT3", "KIT", "CSNK1E", "SHANK3",
+    "NR2E3", "TFAP4",
+    "CDC45", "PCNA", "TYMS",
+    "MUTYH", "ENDOV", "FAN1"
+  ),
+  
+  "6. Paradoxical oncogenes" = c(
+    "APOBEC3A", "PEG10"
+  ),
+  
+  "7. Survival and RNA metabolism" = c(
+    "MCL1", "BCL2A1", "BIRC3",
+    "FASLG", "CASP1", "CASP4", "CASP5",
+    "SNHG14", "SNHG5", "SNHG17",
+    "SNORA79B", "SNORA14B", "SNORA33",
+    "BALR6"
+  )
+)
+
+genes <- unique(unlist(gene_modules))
+
+# ----------------------------
+# 3. Checar genes e amostras
+# ----------------------------
+
+cat("Dimensões da matriz:\n")
+print(dim(matrix_df_annotated))
+
+cat("\nPrimeiros rownames da matriz:\n")
+print(head(rownames(matrix_df_annotated)))
+
+cat("\nPrimeiros colnames da matriz:\n")
+print(head(colnames(matrix_df_annotated)))
+
+cat("\nPrimeiras amostras do col_data_df:\n")
+print(head(col_data_df$sample))
+
+genes_present <- intersect(genes, rownames(matrix_df_annotated))
+genes_missing <- setdiff(genes, rownames(matrix_df_annotated))
+
+cat("\nGenes presentes:", length(genes_present), "\n")
+cat("Genes ausentes:", length(genes_missing), "\n")
+print(genes_missing)
+
+samples_present <- intersect(col_data_df$sample, colnames(matrix_df_annotated))
+samples_missing <- setdiff(col_data_df$sample, colnames(matrix_df_annotated))
+
+cat("\nAmostras presentes:", length(samples_present), "\n")
+cat("Amostras do metadata ausentes na matriz:", length(samples_missing), "\n")
+print(samples_missing)
+
+if (length(genes_present) == 0) {
+  stop("Nenhum gene da lista foi encontrado em rownames(matrix_df_annotated).")
+}
+
+if (length(samples_present) == 0) {
+  stop("Nenhuma amostra de col_data_df$sample foi encontrada em colnames(matrix_df_annotated).")
+}
+
+# ----------------------------
+# 4. Montar matriz do heatmap
+# ----------------------------
+
+mat <- matrix_df_annotated[genes_present, samples_present, drop = FALSE]
+mat <- as.matrix(mat)
+storage.mode(mat) <- "numeric"
+
+# Remover genes com todos os valores NA
+mat <- mat[rowSums(!is.na(mat)) > 0, , drop = FALSE]
+
+# Remover genes com variância zero
+gene_sd <- apply(mat, 1, sd, na.rm = TRUE)
+mat <- mat[gene_sd > 0, , drop = FALSE]
+
+cat("\nGenes após remover NA/variância zero:", nrow(mat), "\n")
+
+if (nrow(mat) == 0) {
+  stop("Depois de remover genes com NA ou variância zero, não sobrou nenhum gene para o heatmap.")
+}
+
+# Z-score por gene
+mat_z <- t(scale(t(mat)))
+
+# Trocar eventuais NA restantes por 0
+mat_z[is.na(mat_z)] <- 0
+
+# ----------------------------
+# 5. Ordenar amostras de Pre para Post
+# ----------------------------
+
+# Garantir que existe uma coluna chamada sample
+# No seu código você criou "samples", mas depois usa "sample"
+if (!"sample" %in% colnames(col_data_df)) {
+  col_data_df$sample <- rownames(col_data_df)
+}
+
+col_data_use <- col_data_df[col_data_df$sample %in% colnames(mat_z), , drop = FALSE]
+
+# Garantir explicitamente a ordem Pre -> Post
+col_data_use$Condition <- factor(
+  col_data_use$Condition,
+  levels = c("Pre-leukemic progression", "Post-leukemic progression")
+)
+
+# Ordem global:
+# primeiro todos os Pre, depois todos os Post
+# dentro de cada grupo, ordena por Patient_ID
+col_data_use <- col_data_use[
+  order(col_data_use$Condition, col_data_use$Patient_ID),
+  ,
+  drop = FALSE
+]
+
+# Reordenar as colunas da matriz na mesma ordem do metadata
+mat_z <- mat_z[, col_data_use$sample, drop = FALSE]
+
+annotation_col <- data.frame(
+  Condition = col_data_use$Condition,
+  Patient_ID = col_data_use$Patient_ID
+)
+
+rownames(annotation_col) <- col_data_use$sample
+
+# Gap vertical entre Pre e Post no heatmap
+condition_vector <- col_data_use$Condition
+gaps_col <- which(condition_vector[-1] != condition_vector[-length(condition_vector)])
+# ----------------------------
+# 6. Anotação de linhas por módulo
+# ----------------------------
+
+gene_to_module <- stack(gene_modules)
+colnames(gene_to_module) <- c("Gene", "Module")
+
+gene_to_module <- gene_to_module[!duplicated(gene_to_module$Gene), ]
+
+annotation_row <- data.frame(
+  Module = gene_to_module$Module[match(rownames(mat_z), gene_to_module$Gene)]
+)
+
+rownames(annotation_row) <- rownames(mat_z)
+
+# Gaps entre módulos
+module_vector <- annotation_row$Module
+gaps_row <- which(module_vector[-1] != module_vector[-length(module_vector)])
+
+# ----------------------------
+# 7. Plotar heatmap
+# ----------------------------
+
+pheatmap(
+  mat_z,
+  annotation_col = annotation_col,
+  annotation_row = annotation_row,
+  gaps_row = gaps_row,
+  gaps_col = gaps_col,
+  cluster_rows = FALSE,
+  cluster_cols = FALSE,
+  show_rownames = TRUE,
+  show_colnames = TRUE,
+  fontsize_row = 7,
+  fontsize_col = 8,
+  border_color = NA,
+  main = "Genes organized by biological function"
+)
+
+# ============================================================
+# counts_noXY -> TPM -> log2(TPM/10 + 1)
+# Mixture file compatible with TISCH2-derived signature matrix
+# ============================================================
+
+library(rtracklayer)
+library(GenomicRanges)
+library(dplyr)
+library(tibble)
+
+# -----------------------------
+# 1. Inputs
+# -----------------------------
+
+# Matriz raw counts sem genes X/Y
+# linhas = genes Ensembl
+# colunas = amostras
+counts_mat <- as.matrix(counts_noXY)
+
+# Caminho para o mesmo GTF usado no alinhamento/contagem
+gtf_file <- "Homo_sapiens.GRCh38.gtf"
+
+# Prefixo dos arquivos de saída
+out_prefix <- "mixture_counts_noXY_TISCH2_scale"
+
+# -----------------------------
+# 2. Limpar IDs Ensembl
+# -----------------------------
+
+rownames(counts_mat) <- sub("\\..*$", "", rownames(counts_mat))
+
+# -----------------------------
+# 3. Importar GTF e calcular gene length
+# -----------------------------
+
+gtf <- rtracklayer::import(gtf_file)
+
+exons <- gtf[gtf$type == "exon"]
+
+exons$gene_id_clean <- sub("\\..*$", "", exons$gene_id)
+
+exons_by_gene <- split(exons, exons$gene_id_clean)
+
+gene_length_bp <- vapply(
+  reduce(exons_by_gene),
+  function(x) sum(width(x)),
+  numeric(1)
+)
+
+gene_annot <- unique(data.frame(
+  gene_id = sub("\\..*$", "", exons$gene_id),
+  gene_symbol = exons$gene_name,
+  stringsAsFactors = FALSE
+))
+
+# -----------------------------
+# 4. Manter genes em comum
+# -----------------------------
+
+common_genes <- intersect(rownames(counts_mat), names(gene_length_bp))
+
+counts_mat <- counts_mat[common_genes, , drop = FALSE]
+gene_length_bp <- gene_length_bp[common_genes]
+
+valid_genes <- !is.na(gene_length_bp) & gene_length_bp > 0
+
+counts_mat <- counts_mat[valid_genes, , drop = FALSE]
+gene_length_bp <- gene_length_bp[valid_genes]
+
+message("Genes after matching with GTF: ", nrow(counts_mat))
+
+# -----------------------------
+# 5. Counts -> TPM
+# -----------------------------
+
+gene_length_kb <- gene_length_bp / 1000
+
+rpk <- counts_mat / gene_length_kb[rownames(counts_mat)]
+
+tpm <- sweep(
+  rpk,
+  2,
+  colSums(rpk, na.rm = TRUE),
+  "/"
+) * 1e6
+
+# Checagem: cada coluna deve somar ~1e6
+print(round(colSums(tpm)[1:min(5, ncol(tpm))], 2))
+
+# -----------------------------
+# 6. Converter Ensembl -> Gene Symbol
+# -----------------------------
+
+annot_use <- gene_annot[match(rownames(tpm), gene_annot$gene_id), ]
+
+tpm_df <- as.data.frame(tpm)
+tpm_df$gene_symbol <- annot_use$gene_symbol
+
+tpm_df <- tpm_df %>%
+  filter(!is.na(gene_symbol), gene_symbol != "")
+
+# Agregar símbolos duplicados em escala linear TPM
+# Usar soma é mais apropriado antes do log
+tpm_symbol <- tpm_df %>%
+  group_by(gene_symbol) %>%
+  summarise(across(where(is.numeric), sum), .groups = "drop")
+
+tpm_symbol <- as.data.frame(tpm_symbol)
+rownames(tpm_symbol) <- tpm_symbol$gene_symbol
+tpm_symbol$gene_symbol <- NULL
+
+message("Gene symbols after aggregation: ", nrow(tpm_symbol))
+
+# -----------------------------
+# 7. TPM -> escala TISCH2
+# -----------------------------
+
+mixture_tisch2_scale <- log2(tpm_symbol / 10 + 1)
+
+# -----------------------------
+# 8. Salvar objetos
+# -----------------------------
+
+saveRDS(
+  tpm_symbol,
+  file = paste0(out_prefix, "_TPM_geneSymbol.rds")
+)
+
+saveRDS(
+  mixture_tisch2_scale,
+  file = paste0(out_prefix, "_log2TPMdiv10plus1_geneSymbol.rds")
+)
+
+# Arquivo .txt para deconvolution
+mixture_out <- mixture_tisch2_scale %>%
+  as.data.frame() %>%
+  rownames_to_column("GeneSymbol")
+
+write.table(
+  mixture_out,
+  file = paste0(out_prefix, "_log2TPMdiv10plus1_geneSymbol.txt"),
+  sep = "\t",
+  quote = FALSE,
+  row.names = FALSE
+)
+
+# Também salvar TPM linear, caso queira rodar análise de sensibilidade
+tpm_out <- tpm_symbol %>%
+  as.data.frame() %>%
+  rownames_to_column("GeneSymbol")
+
+write.table(
+  tpm_out,
+  file = paste0(out_prefix, "_TPM_geneSymbol.txt"),
+  sep = "\t",
+  quote = FALSE,
+  row.names = FALSE
+)
+
+# -----------------------------
+# 9. Checagens finais
+# -----------------------------
+
+message("Final mixture dimensions:")
+print(dim(mixture_tisch2_scale))
+
+message("Summary of TISCH2-scale mixture:")
+print(summary(as.vector(as.matrix(mixture_tisch2_scale))))
+
+message("Files saved:")
+print(list.files(pattern = out_prefix))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# ============================================================
+# CIBERSORTx plots
+# Condition = 4 groups:
+# Pre-leukemic progression / Post-leukemic progression
+# First sample / Second sample
+# ============================================================
+
+library(tibble)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(scales)
+library(ggpubr)
+
+# -----------------------------
+# 1. Ler resultados
+# -----------------------------
+
+CIBERSORTx_results <- read.csv(
+  "CIBERSORTx_Job40_Results.csv",
+  row.names = 1,
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+
+CIBERSORTx_results <- as.data.frame(CIBERSORTx_results)
+
+# -----------------------------
+# 2. Ordenar pela mesma ordem do metadata
+# -----------------------------
+
+CIBERSORTx_results <- CIBERSORTx_results[rownames(col_data_hm), ]
+
+# -----------------------------
+# 3. Remover colunas técnicas do CIBERSORTx
+# -----------------------------
+
+CIBERSORTx_results <- CIBERSORTx_results[, 
+                                         !(names(CIBERSORTx_results) %in% c("P.value", "P-value", "Correlation", "RMSE"))
+]
+
+# -----------------------------
+# 4. Adicionar Condition
+# -----------------------------
+
+CIBERSORTx_results$Condition <- col_data_hm[rownames(CIBERSORTx_results), "Condition"]
+
+condition_colors <- c(
+  "Pre-leukemic progression"  = "#9ECAE1",  # azul claro
+  "Post-leukemic progression" = "#DE2D26",  # vermelho
+  "First sample"              = "#D9D9D9",  # cinza claro
+  "Second sample"             = "#636363"   # cinza escuro
+)
+
+CIBERSORTx_results$Condition <- factor(
+  CIBERSORTx_results$Condition,
+  levels = names(condition_colors)
+)
+
+# ============================================================
+# 5. STACKED BARPLOT
+# ============================================================
+
+cibersortx_long <- CIBERSORTx_results %>%
+  rownames_to_column("Sample") %>%
+  pivot_longer(
+    cols = -c(Sample, Condition),
+    names_to = "CellState",
+    values_to = "Proportion"
+  )
+
+p_stack <- ggplot(cibersortx_long, aes(x = Sample, y = Proportion, fill = CellState)) +
+  geom_bar(stat = "identity") +
+  facet_wrap(~ Condition, scales = "free_x", nrow = 1, strip.position = "bottom") +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  labs(
+    x = "Sample",
+    y = "Estimated proportion (%)",
+    fill = "Cell state",
+    title = "CIBERSORTx-estimated cell-state composition across sampling points"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x     = element_text(angle = 90, vjust = 0.5, hjust = 1),
+    strip.placement = "bottom",
+    strip.background = element_rect(fill = "grey90", color = NA),
+    strip.text       = element_text(face = "bold"),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor   = element_blank(),
+    plot.title = element_text(face = "bold")
+  )
+
+p_stack
+
+# ============================================================
+# 6. PROPORTION PLOT
+# ============================================================
+
+plot_data <- CIBERSORTx_results %>%
+  rownames_to_column("Patient_ID") %>%
+  pivot_longer(
+    cols = -c(Patient_ID, Condition),
+    names_to = "CellState",
+    values_to = "Proportion"
+  )
+
+summary_data <- plot_data %>%
+  group_by(Condition, CellState) %>%
+  summarise(
+    mean_prop = mean(Proportion, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Como Condition tem 4 grupos, usar Kruskal-Wallis
+stat_results <- plot_data %>%
+  group_by(CellState) %>%
+  summarise(
+    p_value = kruskal.test(Proportion ~ Condition)$p.value,
+    .groups = "drop"
+  ) %>%
+  mutate(
+    p_adj = p.adjust(p_value, method = "BH"),
+    signif = case_when(
+      p_adj <= 0.001 ~ "***",
+      p_adj <= 0.01  ~ "**",
+      p_adj <= 0.05  ~ "*",
+      TRUE           ~ ""
+    )
+  )
+
+text_positions <- plot_data %>%
+  group_by(CellState) %>%
+  summarise(
+    max_prop = max(Proportion, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  left_join(stat_results, by = "CellState") %>%
+  mutate(y_pos = max_prop + 0.02)
+
+p_prop <- ggplot(summary_data, aes(x = CellState, y = mean_prop, fill = Condition)) +
+  geom_bar(
+    stat = "identity",
+    position = position_dodge(0.9),
+    alpha = 0.7,
+    colour = "grey30",
+    linewidth = 0.2
+  ) +
+  
+  geom_jitter(
+    data = plot_data,
+    aes(x = CellState, y = Proportion, color = Condition),
+    position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.9),
+    size = 1.8,
+    shape = 21,
+    alpha = 0.85,
+    inherit.aes = FALSE
+  ) +
+  
+  geom_text(
+    data = text_positions %>% filter(signif != ""),
+    aes(x = CellState, y = y_pos, label = signif),
+    inherit.aes = FALSE,
+    vjust = 0,
+    size = 5
+  ) +
+  
+  scale_fill_manual(values = condition_colors, name = "Sampling point") +
+  scale_color_manual(values = condition_colors, name = "Sampling point") +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  
+  labs(
+    title = "CIBERSORTx-estimated cell-state proportions across sampling points",
+    subtitle = "Bars represent group means; sample points represent individual samples",
+    x = "Cell state",
+    y = "Estimated proportion (%)"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank(),
+    plot.title = element_text(face = "bold")
+  )
+
+p_prop
+
+# ============================================================
+# 7. Salvar figuras
+# ============================================================
+
+ggsave(
+  "CIBERSORTx_stacked_barplot_sampling_points.png",
+  plot = p_stack,
+  width = 11,
+  height = 5,
+  dpi = 300
+)
+
+ggsave(
+  "CIBERSORTx_cell_state_proportions_sampling_points.png",
+  plot = p_prop,
+  width = 10,
+  height = 5.5,
+  dpi = 300
+)

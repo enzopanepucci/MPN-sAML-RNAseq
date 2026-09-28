@@ -1,0 +1,80 @@
+gene_symbol,module
+IRF8,1. Myeloid identity loss
+KLF4,1. Myeloid identity loss
+MAFB,1. Myeloid identity loss
+VDR,1. Myeloid identity loss
+RXRA,1. Myeloid identity loss
+NR4A1,1. Myeloid identity loss
+CEBPD,1. Myeloid identity loss
+BCL6,1. Myeloid identity loss
+RUNX1,1. Myeloid identity loss
+ETV5,1. Myeloid identity loss
+HOXC4,1. Myeloid identity loss
+UHRF1,1. Myeloid identity loss
+TLR1,2. Myeloid sensors and effectors
+TLR4,2. Myeloid sensors and effectors
+TLR5,2. Myeloid sensors and effectors
+NOD2,2. Myeloid sensors and effectors
+FCGR3A,2. Myeloid sensors and effectors
+FCGR2A,2. Myeloid sensors and effectors
+FCGR1A,2. Myeloid sensors and effectors
+FCAR,2. Myeloid sensors and effectors
+CD14,2. Myeloid sensors and effectors
+CD36,2. Myeloid sensors and effectors
+MSR1,2. Myeloid sensors and effectors
+LYZ,2. Myeloid sensors and effectors
+ALOX5,2. Myeloid sensors and effectors
+S100A8,2. Myeloid sensors and effectors
+S100A9,2. Myeloid sensors and effectors
+S100A12,2. Myeloid sensors and effectors
+C3,2. Myeloid sensors and effectors
+C3AR1,2. Myeloid sensors and effectors
+IFNG,3. Cytokines and chemokines
+IL1B,3. Cytokines and chemokines
+TNFSF10,3. Cytokines and chemokines
+CCL2,3. Cytokines and chemokines
+CCL8,3. Cytokines and chemokines
+CXCL10,3. Cytokines and chemokines
+CXCL5,3. Cytokines and chemokines
+CCR2,"4. Adhesion, migration and antigen presentation"
+CX3CR1,"4. Adhesion, migration and antigen presentation"
+CCR1,"4. Adhesion, migration and antigen presentation"
+CCR5,"4. Adhesion, migration and antigen presentation"
+ICAM1,"4. Adhesion, migration and antigen presentation"
+VCAM1,"4. Adhesion, migration and antigen presentation"
+ITGAM,"4. Adhesion, migration and antigen presentation"
+ITGAX,"4. Adhesion, migration and antigen presentation"
+ITGB2,"4. Adhesion, migration and antigen presentation"
+JAKMIP1,"4. Adhesion, migration and antigen presentation"
+HLA-DRA,"4. Adhesion, migration and antigen presentation"
+HLA-DRB1,"4. Adhesion, migration and antigen presentation"
+CD86,"4. Adhesion, migration and antigen presentation"
+CD40,"4. Adhesion, migration and antigen presentation"
+FLT3,5. Malignant proliferation and DNA repair
+KIT,5. Malignant proliferation and DNA repair
+CSNK1E,5. Malignant proliferation and DNA repair
+SHANK3,5. Malignant proliferation and DNA repair
+NR2E3,5. Malignant proliferation and DNA repair
+TFAP4,5. Malignant proliferation and DNA repair
+CDC45,5. Malignant proliferation and DNA repair
+PCNA,5. Malignant proliferation and DNA repair
+TYMS,5. Malignant proliferation and DNA repair
+MUTYH,5. Malignant proliferation and DNA repair
+ENDOV,5. Malignant proliferation and DNA repair
+FAN1,5. Malignant proliferation and DNA repair
+APOBEC3A,6. Paradoxical oncogenes
+PEG10,6. Paradoxical oncogenes
+MCL1,7. Survival and RNA metabolism
+BCL2A1,7. Survival and RNA metabolism
+BIRC3,7. Survival and RNA metabolism
+FASLG,7. Survival and RNA metabolism
+CASP1,7. Survival and RNA metabolism
+CASP4,7. Survival and RNA metabolism
+CASP5,7. Survival and RNA metabolism
+SNHG14,7. Survival and RNA metabolism
+SNHG5,7. Survival and RNA metabolism
+SNHG17,7. Survival and RNA metabolism
+SNORA79B,7. Survival and RNA metabolism
+SNORA14B,7. Survival and RNA metabolism
+SNORA33,7. Survival and RNA metabolism
+BALR6,7. Survival and RNA metabolism

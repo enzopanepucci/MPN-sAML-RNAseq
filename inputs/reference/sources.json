@@ -1,0 +1,23 @@
+[
+  {
+    "file": "ensembl_annotation_raw.tsv",
+    "url": "https://www.ensembl.org/biomart/martservice?query=%3C%3Fxml+version%3D%221.0%22+encoding%3D%22UTF-8%22%3F%3E%3C%21DOCTYPE+Query%3E%3CQuery+virtualSchemaName%3D%22default%22+formatter%3D%22TSV%22+header%3D%221%22+uniqueRows%3D%221%22+datasetConfigVersion%3D%220.6%22%3E%3CDataset+name%3D%22hsapiens_gene_ensembl%22+interface%3D%22default%22%3E%3CAttribute+name%3D%22ensembl_gene_id%22%2F%3E%3CAttribute+name%3D%22external_gene_name%22%2F%3E%3CAttribute+name%3D%22chromosome_name%22%2F%3E%3C%2FDataset%3E%3C%2FQuery%3E",
+    "bytes": 2126001,
+    "retrieved": "2026-09-28",
+    "sha256": "c2975367e7a39ba55d1c4e2ee261eb3cac98a519d8f73d8dab5c1aff8391d1aa"
+  },
+  {
+    "file": "hallmark_2025.1.Hs.gmt",
+    "url": "https://data.broadinstitute.org/gsea-msigdb/msigdb/release/2025.1.Hs/h.all.v2025.1.Hs.symbols.gmt",
+    "bytes": 48689,
+    "retrieved": "2026-09-28",
+    "sha256": "f22066af72e215ccb7b89d88e492c07e1eef17534c2ca7b0f9902cfecbbdd8e9"
+  },
+  {
+    "file": "kegg_legacy_2025.1.Hs.gmt",
+    "url": "https://data.broadinstitute.org/gsea-msigdb/msigdb/release/2025.1.Hs/c2.cp.kegg_legacy.v2025.1.Hs.symbols.gmt",
+    "bytes": 100258,
+    "retrieved": "2026-09-28",
+    "sha256": "7b5d5fd85d52b65d6a724a23794f29e49df6050f42362c2fd4a130b11467957e"
+  }
+]
