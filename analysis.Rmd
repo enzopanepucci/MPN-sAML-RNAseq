@@ -182,7 +182,7 @@ annotation_audit <- data.frame(Ensembl_ID = rownames(counts_clean),
                               passes_expression = keep_expression,
                               passes_chromosome = keep_chromosome) |>
   left_join(annotation, by = "Ensembl_ID")
-write.csv(annotation_audit, "outputs/tables/Table_S12_annotation_filter_audit.csv", row.names = FALSE)
+write.csv(annotation_audit, "outputs/tables/Table_S11_annotation_filter_audit.csv", row.names = FALSE)
 filter_summary <- data.frame(step = c("Input rows", "Gene rows", "Expression filter",
                                       "Expression filter + exclusion of X/Y", "DEGs",
                                       "DEGs with symbols", "Unique DEG symbols"),
