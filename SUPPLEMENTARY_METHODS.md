@@ -20,23 +20,30 @@ Figure S1 explores sample structure using the progressor-only VST matrix. PCA us
 
 ## Preranked gene set enrichment
 
-All genes with finite unadjusted DESeq2 *P* values and finite log2 fold changes can enter GSEA, regardless of DEG thresholds. Ranking uses Ensembl IDs without gene-symbol deduplication. With \(L\) the post-versus-pre log2 fold change and \(p^*=\max(p,\texttt{.Machine\$double.xmin})\), the comparator scores are
 
-\[
-r_{\mathrm{confidence}}=\operatorname{sign}(L)[-\log_{10}(p^*)],\qquad
-r_{\mathrm{impact}}=L[-\log_{10}(p^*)].
-\]
+All genes with finite unadjusted DESeq2 *P* values and finite log2 fold changes can enter GSEA, regardless of DEG thresholds. Ranking uses Ensembl IDs without gene-symbol deduplication. The **main GSEA analysis uses the hybrid ranking** selected in `config.yml`. Let `L` be the post-versus-pre log2 fold change and `p` the unadjusted DESeq2 P value. For numerical stability, `q = max(p, .Machine$double.xmin)`. The score is
 
-The hybrid score used for the main GSEA results is
-
-\[
-r_{\mathrm{hybrid}}=\operatorname{sign}(L)
+```math
+r_{\mathrm{hybrid}}=\mathrm{sign}(L)
 \begin{cases}
--\log_{10}(0.05)+|L|, & p^*<0.05,\\
--\log_{10}(p^*)+|L|, & 0.05\leq p^*<0.10,\\
--\log_{10}(p^*), & p^*\geq0.10.
+-\log_{10}(0.05)+|L|, & q<0.05,\\
+-\log_{10}(q)+|L|, & 0.05\leq q<0.10,\\
+-\log_{10}(q), & q\geq0.10.
 \end{cases}
-\]
+```
+
+
+The first two branches meet at 0.05. The implemented score is discontinuous at 0.10 because the magnitude term is dropped. Descending ranks are analysed with `fgsea::fgseaMultilevel`, `scoreType = "std"`, `eps = 1e-10`, `nproc = 1`, and seed 2026. The workflow reads frozen **MSigDB 7.5.1** Hallmark and KEGG sets with Ensembl IDs from `inputs/reference/msigdb_7.5.1_ensembl.rds`. Set-size limits are 10–500 for Hallmark and 15–500 for KEGG. The 7.5.1 TSV files in that directory are reference tables; the RDS is the file read by GSEA.
+
+The **confidence** and **impact** scores below are calculated only as comparison rankings for Figure S4 and Table S10; they do not supply the main GSEA results:
+
+```math
+\begin{aligned}
+r_{\mathrm{confidence}} &= \mathrm{sign}(L)[-\log_{10}(q)],\\
+r_{\mathrm{impact}} &= L[-\log_{10}(q)].
+\end{aligned}
+```
+
 
 The first two branches meet at 0.05. The implemented score is discontinuous at 0.10 because the magnitude term is dropped. Descending ranks are analysed with `fgsea::fgseaMultilevel`, `scoreType = "std"`, `eps = 1e-10`, `nproc = 1`, and seed 2026. The workflow reads frozen **MSigDB 7.5.1** Hallmark and KEGG sets with Ensembl IDs from `inputs/reference/msigdb_7.5.1_ensembl.rds`. Set-size limits are 10–500 for Hallmark and 15–500 for KEGG. The 7.5.1 TSV files in that directory are reference tables; the RDS is the file read by GSEA.
 
