@@ -1,51 +1,87 @@
----
-title: "MPN → sAML | Transcriptomic reanalysis"
-subtitle: "Paired DESeq2, pathway enrichment and CIBERSORTx figures"
-author: "Enzo Marques Panepucci"
-date: "`r format(Sys.Date(), '%d %B %Y')`"
-output:
-  html_document:
-    toc: true
-    toc_float: true
-    toc_depth: 2
-    theme: cosmo
-    highlight: tango
-    code_folding: hide
-    self_contained: true
-    df_print: paged
----
+# MPN to sAML: paired RNA-seq analysis
+# Author: Enzo Marques Panepucci
+# Run from the project root: Rscript --vanilla analysis.R
+# In RStudio: open the project using the conda R installation, then source("analysis.R").
+# The existing inputs/ directory is required. All settings are defined below.
+# Outputs: Figures 1A-D and 2A-B, Figures S1A-B/S2/S3/S4A-B/S5, and Tables S1-S11.
+# Checkpoint: load("checkpoints/analysis_objects.rda") restores named objects.
+# Graphs are always rebuilt from data in the current session; old plot RDS files are not read.
 
-This is a **reproducible paired analysis** based on the provided files.
-The 12 progressor pairs are included in DESeq2; the five non-progressor pairs
-are used only in descriptive visualisations. This document is the single source
-of the workflow and saves figures, tables, and intermediate objects within the project.
+# 1. Settings and packages -------------------------------------------------------
+cfg <- list(
+  seed = 2026L,
+  reuse_checkpoints = TRUE,
+  min_count = 10L,
+  min_samples = 6L,
+  remove_xy = TRUE,
+  padj_cutoff = 0.05,
+  lfc_cutoff = 0.5,
+  results_alpha = 0.10,
+  gsea_min_size_kegg = 15L,
+  gsea_min_size_hallmark = 10L,
+  gsea_max_size = 500L,
+  gsea_eps = 1e-10,
+  gsea_method = "hybrid",
+  msigdb_version = "7.5.1",
+  tsne_perplexity = 5L,
+  png_dpi = 300L
+)
 
-## 1. Preparation
-
-The code follows a direct sequence. Objects remain available in the R environment;
-two checkpoints prevent unnecessary repetition of DESeq2/VST and GSEA. To recompute
-everything, set `reuse_checkpoints: false` in `config.yml`. Figures are saved as PDF
-and PNG files in addition to being displayed in this report.
-
-```{r setup, include=FALSE}
-knitr::opts_chunk$set(message = FALSE, warning = FALSE, fig.width = 11,
-                     fig.height = 6, out.width = "100%", dpi = 120)
+# Restrict an activated conda session to the packages in that environment.
+conda_prefix <- Sys.getenv("CONDA_PREFIX")
+if (nzchar(conda_prefix)) {
+  if (!startsWith(normalizePath(R.home()), normalizePath(conda_prefix))) {
+    stop("This R session does not use the activated conda environment. Run its Rscript.")
+  }
+  .libPaths(.Library)
+}
 required <- c("DESeq2", "fgsea", "dplyr", "tidyr", "tibble", "ggplot2",
               "ggrepel", "pheatmap", "cowplot", "patchwork", "scales",
-              "Rtsne", "yaml", "digest", "data.table", "matrixStats",
-              "knitr", "rmarkdown")
-if (!all(vapply(required, requireNamespace, logical(1), quietly = TRUE))) {
-  source("scripts/install_packages.R")
+              "Rtsne", "yaml", "digest", "data.table", "matrixStats")
+installed <- installed.packages()
+missing <- setdiff(required, rownames(installed))
+if (length(missing)) {
+  stop("Missing packages: ", paste(missing, collapse = ", "),
+       ". Create and activate the environment from environment.yml before running.")
 }
-for (pkg in required) suppressPackageStartupMessages(library(pkg, character.only = TRUE))
-cfg <- yaml::read_yaml("config.yml")
-stopifnot(identical(cfg$filter_mode, "recent"),
-          cfg$min_count == 10, cfg$min_samples == 6)
+for (pkg in intersect(required, loadedNamespaces())) {
+  if (as.character(getNamespaceVersion(pkg)) != installed[pkg, "Version"]) {
+    stop("Restart R before running: the loaded version of ", pkg,
+         " differs from the version installed in this environment.")
+  }
+}
+suppressPackageStartupMessages({
+  library(DESeq2)
+  library(dplyr)
+  library(tidyr)
+  library(ggplot2)
+  library(patchwork)
+})
+# The remaining packages are called with package::function.
 set.seed(cfg$seed)
 for (folder in c("outputs/figures", "outputs/supplementary_figures",
                  "outputs/tables", "outputs/reports", "checkpoints")) {
   dir.create(folder, recursive = TRUE, showWarnings = FALSE)
 }
+input_files <- c("inputs/count_matrix.csv", "inputs/coldata.csv",
+                 "inputs/cibersortx_job40.csv", "inputs/gene_modules.csv",
+                 "inputs/reference/ensembl_annotation_raw.tsv",
+                 "inputs/reference/msigdb_7.5.1_ensembl.rds")
+if (!all(file.exists(input_files))) {
+  stop("Missing inputs: ", paste(input_files[!file.exists(input_files)], collapse = ", "))
+}
+input_checksums <- tools::md5sum(input_files)
+package_versions <- as.data.frame(installed.packages()[, c("Package", "Version")])
+package_versions <- package_versions[order(package_versions$Package), ]
+rownames(package_versions) <- NULL
+runtime_key <- digest::digest(list(R = R.version.string, packages = package_versions))
+checkpoint_file <- "checkpoints/analysis_objects.rda"
+checkpoint_env <- new.env(parent = emptyenv())
+checkpoint_names <- character()
+if (isTRUE(cfg$reuse_checkpoints) && file.exists(checkpoint_file)) {
+  checkpoint_names <- load(checkpoint_file, envir = checkpoint_env)
+}
+
 theme_set(theme_classic(base_size = 12) +
             theme(plot.title = element_text(face = "bold", size = 14),
                   plot.subtitle = element_text(size = 10, colour = "grey35"),
@@ -57,9 +93,8 @@ group_colors <- c("Pre-leukaemic" = "#9ECAE1", "Post-leukaemic" = "#CB181D",
 cell_colors <- c("Monocyte" = "#4C78A8", "NK" = "#59A14F", "GMP" = "#76B7B2",
                  "Progenitor" = "#E6B84A", "Malignant" = "#D85759",
                  "Promonocyte" = "#AA78A7")
-```
 
-```{r inputs}
+# 2. Inputs and sample quality control ----------------------------------------
 counts_raw <- as.matrix(read.csv("inputs/count_matrix.csv", row.names = 1,
                                 check.names = FALSE))
 col_data <- read.csv("inputs/coldata.csv", row.names = 1, check.names = FALSE)
@@ -102,21 +137,8 @@ sample_qc <- data.frame(sample = colnames(counts_clean),
   mutate(included = !is.na(Patient_ID),
          reason = ifelse(included, "Included", "No metadata; not analysed"))
 write.csv(sample_qc, "outputs/tables/Table_S1_sample_QC.csv", row.names = FALSE)
-knitr::kable(as.data.frame(table(col_data$Sampling_point)),
-             col.names = c("Sampling point", "Samples"))
-```
 
-`Amostra_18` (P09 pre_2) has no matching metadata. It is retained in the input
-and quality-control table but is not included in the inferential analyses.
-
-## 2. Annotation, filtering, and paired DESeq2
-
-The expression filter retains genes with counts >=10 in at least six
-**progressor** samples. Ensembl annotation is frozen in a local file; genes
-without annotation remain in the differential analysis. X/Y genes are excluded
-according to the configuration.
-
-```{r deseq2}
+# 3. Annotation, expression filter, and paired DESeq2 -------------------------
 annotation_raw <- read.delim("inputs/reference/ensembl_annotation_raw.tsv",
                              stringsAsFactors = FALSE, check.names = FALSE)
 names(annotation_raw) <- c("Ensembl_ID", "gene_symbol", "chromosome")
@@ -125,23 +147,28 @@ xy_ids <- unique(annotation_raw$Ensembl_ID[annotation_raw$chromosome %in% c("X",
 annotation <- annotation_raw |>
   arrange(Ensembl_ID, is.na(gene_symbol), gene_symbol, chromosome) |>
   distinct(Ensembl_ID, .keep_all = TRUE)
+# This key changes when inputs, model settings, R, or installed packages change.
 analysis_key <- digest::digest(list(
-  revision = 1,
-  files = tools::md5sum(c("inputs/count_matrix.csv", "inputs/coldata.csv",
-                         "inputs/reference/ensembl_annotation_raw.tsv")),
-  # Inactive 30/5 fields preserve the key of the supplied 10/6 checkpoint.
-  parameters = c(list(filter_mode = cfg$filter_mode,
-                      min_total_count = 30L, min_nonzero_samples = 5L),
-                 cfg[c("min_count", "min_samples", "remove_xy", "results_alpha",
-                       "padj_cutoff", "lfc_cutoff")]),
-  DESeq2 = as.character(packageVersion("DESeq2"))))
-checkpoint_de <- "checkpoints/01_DESeq2_VST.rds"
-de_state <- if (file.exists(checkpoint_de)) readRDS(checkpoint_de) else NULL
-
-if (isTRUE(cfg$reuse_checkpoints) && identical(de_state$key, analysis_key)) {
-  list2env(de_state$objects, envir = .GlobalEnv)
-  message("DESeq2/VST checkpoint loaded.")
+  revision = "single-script-v1",
+  files = input_checksums[c("inputs/count_matrix.csv", "inputs/coldata.csv",
+                            "inputs/reference/ensembl_annotation_raw.tsv")],
+  design = "~ Patient_ID + Condition",
+  parameters = cfg[c("min_count", "min_samples", "remove_xy", "results_alpha",
+                     "padj_cutoff", "lfc_cutoff")],
+  runtime = runtime_key))
+de_objects <- c("dds", "res", "res_df", "degs", "counts_filtered", "counts_prog",
+                "dds_all", "vsd_all", "vsd_prog", "vst_matrix",
+                "normalized_counts_all", "keep_expression", "keep_chromosome")
+checkpoint_objects <- c("analysis_key", de_objects)
+if (isTRUE(cfg$reuse_checkpoints) &&
+    identical(checkpoint_env$analysis_key, analysis_key) &&
+    all(de_objects %in% checkpoint_names)) {
+  for (object in de_objects) {
+    assign(object, get(object, envir = checkpoint_env), envir = environment())
+  }
+  message("Paired DESeq2 and VST objects restored from the .rda checkpoint.")
 } else {
+  message("Fitting paired DESeq2 and calculating VST matrices.")
   prog_counts_raw <- counts_clean[, rownames(col_data_prog), drop = FALSE]
   keep_expression <- rowSums(prog_counts_raw >= cfg$min_count) >= cfg$min_samples
   keep_chromosome <- !cfg$remove_xy | !rownames(counts_clean) %in% xy_ids
@@ -169,12 +196,8 @@ if (isTRUE(cfg$reuse_checkpoints) && identical(de_state$key, analysis_key)) {
   vsd_prog <- varianceStabilizingTransformation(dds, blind = FALSE)
   vst_matrix <- assay(vsd_all)
   normalized_counts_all <- counts(dds_all, normalized = TRUE)
-  de_state <- list(key = analysis_key, objects = list(
-    dds = dds, res = res, res_df = res_df, degs = degs,
-    counts_filtered = counts_filtered, vsd_all = vsd_all, vsd_prog = vsd_prog,
-    vst_matrix = vst_matrix, normalized_counts_all = normalized_counts_all,
-    keep_expression = keep_expression, keep_chromosome = keep_chromosome))
-  saveRDS(de_state, checkpoint_de)
+  save(list = checkpoint_objects, file = checkpoint_file,
+       compress = "gzip", compression_level = 1, version = 3)
 }
 write.csv(res_df, "outputs/tables/Table_S2_DESeq2_all_genes.csv", row.names = FALSE)
 write.csv(degs, "outputs/tables/Table_S3_DEGs.csv", row.names = FALSE)
@@ -190,12 +213,13 @@ filter_summary <- data.frame(step = c("Input rows", "Gene rows", "Expression fil
                                    nrow(counts_filtered), nrow(degs),
                                    sum(!is.na(degs$gene_symbol)),
                                    n_distinct(na.omit(degs$gene_symbol))))
-knitr::kable(filter_summary)
-```
+n_significant <- sum(res_df$padj < cfg$padj_cutoff, na.rm = TRUE)
+message(n_significant, " genes with adjusted P < ", cfg$padj_cutoff, "; ",
+        nrow(degs), " also meet the fold-change threshold; ",
+        sum(degs$direction == "Down"), " downregulated and ",
+        sum(degs$direction == "Up"), " upregulated.")
 
-## 3. Figure 1A — volcano
-
-```{r volcano, fig.height=7}
+# 4. Figure 1A: volcano -------------------------------------------------------
 volcano_df <- res_df |>
   mutate(
     neg_log10_padj = -log10(pmax(padj, .Machine$double.xmin)),
@@ -234,18 +258,8 @@ p_1A <- ggplot(filter(volcano_df, is.finite(neg_log10_padj)),
        x = expression(log[2]~fold~change~"(post / pre)"),
        y = expression(-log[10]~adjusted~italic(P)), colour = NULL) +
   theme(legend.position = "top")
-p_1A
-```
 
-## 4. Figure 1B — heatmap by biological function
-
-The 79-gene biological module list is stored in `inputs/gene_modules.csv`.
-The panel includes only genes from this list that meet the same DEG criteria.
-Table S9 records both included and excluded genes. Expression values were
-VST-transformed (`blind = FALSE`, visual design by sampling group) and standardised
-per gene across the 34 samples.
-
-```{r heatmaps, fig.width=13, fig.height=12}
+# 5. Figure 1B and Figure S2: expression heatmaps -----------------------------
 degs_symbols <- degs |> filter(!is.na(gene_symbol)) |>
   arrange(padj, Ensembl_ID) |> distinct(gene_symbol, .keep_all = TRUE)
 module_membership <- gene_modules |>
@@ -278,48 +292,47 @@ ann_colors <- list(`Sampling point` = group_colors,
 gaps_col <- head(cumsum(rle(as.character(col_data$Sampling_point))$lengths), -1)
 gaps_row <- head(cumsum(rle(module_degs$module)$lengths), -1)
 heat_colors <- colorRampPalette(c("#2166AC", "#F7F7F7", "#B2182B"))(100)
-hm_bio <- pheatmap(hm_z, color = heat_colors, annotation_col = annotation_col,
+hm_bio <- pheatmap::pheatmap(hm_z, color = heat_colors, annotation_col = annotation_col,
                    annotation_row = annotation_row, annotation_colors = ann_colors,
                    gaps_col = gaps_col, gaps_row = gaps_row,
                    cluster_rows = FALSE, cluster_cols = FALSE, border_color = NA,
+                   annotation_names_row = FALSE,
                    labels_col = col_data$sample_label, fontsize = 9,
                    fontsize_row = 8, fontsize_col = 8, angle_col = 90,
                    main = "Selected DEGs organised by biological function", silent = TRUE)
-p_1B <- cowplot::ggdraw(hm_bio$gtable) +
-  cowplot::draw_label("(B)", x = 0.01, y = 0.99, hjust = 0, vjust = 1,
+# Keep the annotation legends in one lower, aligned column.
+heatmap_1B <- hm_bio$gtable
+legend_index <- which(heatmap_1B$layout$name == "legend")
+annotation_legend_index <- which(heatmap_1B$layout$name == "annotation_legend")
+z_legend <- heatmap_1B$grobs[[legend_index]]
+annotation_legend <- heatmap_1B$grobs[[annotation_legend_index]]
+legend_columns <- unique(heatmap_1B$layout$l[c(legend_index, annotation_legend_index)])
+matrix_column <- heatmap_1B$layout$l[heatmap_1B$layout$name == "matrix"]
+heatmap_1B$widths[matrix_column] <- heatmap_1B$widths[matrix_column] +
+  sum(heatmap_1B$widths[legend_columns])
+heatmap_1B$widths[legend_columns] <- grid::unit(0, "pt")
+heatmap_1B$grobs[c(legend_index, annotation_legend_index)] <-
+  rep(list(grid::nullGrob()), 2)
+p_1B <- cowplot::ggdraw() +
+  cowplot::draw_grob(heatmap_1B, x = 0, y = 0, width = 0.78, height = 0.95) +
+  cowplot::draw_grob(annotation_legend, x = 0.80, y = 0.05, width = 0.20, height = 0.84) +
+  cowplot::draw_grob(z_legend, x = 0.80, y = 0, width = 0.20, height = 0.59) +
+  cowplot::draw_label("Row Z-score", x = 0.80, y = 0.61, hjust = 0,
+                      fontface = "bold", size = 9) +
+  cowplot::draw_label("(B)", x = 0.01, y = 0.995, hjust = 0, vjust = 1,
                       fontface = "bold", size = 18)
-p_1B
 
 all_deg_matrix <- vst_matrix[degs_symbols$Ensembl_ID, rownames(col_data), drop = FALSE]
 rownames(all_deg_matrix) <- degs_symbols$gene_symbol
 all_deg_z <- t(scale(t(all_deg_matrix)))
-hm_all <- pheatmap(all_deg_z, color = heat_colors, annotation_col = annotation_col,
+hm_all <- pheatmap::pheatmap(all_deg_z, color = heat_colors, annotation_col = annotation_col,
                    annotation_colors = ann_colors, gaps_col = gaps_col,
                    cluster_rows = TRUE, cluster_cols = FALSE, show_rownames = FALSE,
                    labels_col = col_data$sample_label, fontsize_col = 8,
                    border_color = NA, main = "All annotated DEGs | row Z-score", silent = TRUE)
 p_S2 <- cowplot::ggdraw(hm_all$gtable)
-```
 
-## 5. Figures 1C–D — GSEA
-
-The analysis uses the **raw P value** for ranking:
-
-\[
-r = \operatorname{sign}(L)\begin{cases}
--\log_{10}(0.05)+|L|, & p<0.05\\
--\log_{10}(p)+|L|, & 0.05\leq p<0.1\\
--\log_{10}(p), & p\geq0.1.
-\end{cases}
-\]
-
-Here, \(L=\log_2FC\). This is the hybrid-ranking formula used in the analysis.
-It **is not a continuous interpolation at P=0.1**. The ranking uses Ensembl IDs and
-frozen version 7.5.1 gene-set collections.
-Gene-set size limits are preserved at 15-500 for KEGG and 10-500 for Hallmark.
-The panels display all pathways with **padj < 0.05**, without forcing totals of 98/47.
-
-```{r gsea}
+# 6. Figures 1C-D: GSEA -------------------------------------------------------
 pathways <- readRDS("inputs/reference/msigdb_7.5.1_ensembl.rds")
 # The ranking uses all Ensembl IDs with a calculated P value, without padj/effect filtering
 # and without conversion or deduplication by gene symbol.
@@ -333,17 +346,18 @@ rank_table <- res_df |>
            p_safe < 0.05 ~ -log10(0.05) + abs(log2FoldChange),
            p_safe < 0.10 ~ -log10(p_safe) + abs(log2FoldChange),
            TRUE ~ -log10(p_safe)))
-gsea_key <- digest::digest(list(analysis_key, rank_table,
-                               tools::md5sum("inputs/reference/msigdb_7.5.1_ensembl.rds"),
-                               cfg[c("gsea_min_size_kegg", "gsea_min_size_hallmark",
-                                     "gsea_max_size", "gsea_eps", "seed")],
-                               as.character(packageVersion("fgsea"))))
-checkpoint_gsea <- "checkpoints/02_GSEA.rds"
-gsea_state <- if (file.exists(checkpoint_gsea)) readRDS(checkpoint_gsea) else NULL
-if (isTRUE(cfg$reuse_checkpoints) && identical(gsea_state$key, gsea_key)) {
-  gsea_results <- gsea_state$results
-  message("GSEA checkpoint loaded.")
+gsea_key <- digest::digest(list(
+  analysis_key, rank_table,
+  input_checksums["inputs/reference/msigdb_7.5.1_ensembl.rds"],
+  cfg[c("gsea_min_size_kegg", "gsea_min_size_hallmark", "gsea_max_size",
+        "gsea_eps", "seed")], runtime_key))
+checkpoint_objects <- c(checkpoint_objects, "gsea_key", "gsea_results", "rank_table", "pathways")
+if (isTRUE(cfg$reuse_checkpoints) && identical(checkpoint_env$gsea_key, gsea_key) &&
+    "gsea_results" %in% checkpoint_names) {
+  gsea_results <- checkpoint_env$gsea_results
+  message("GSEA results restored from the .rda checkpoint.")
 } else {
+  message("Calculating KEGG and Hallmark GSEA for the three ranking metrics.")
   gsea_results <- list()
   for (collection in names(pathways)) {
     for (metric in c("confidence", "impact", "hybrid")) {
@@ -356,7 +370,8 @@ if (isTRUE(cfg$reuse_checkpoints) && identical(gsea_state$key, gsea_key)) {
                                scoreType = "std", nproc = 1))
     }
   }
-  saveRDS(list(key = gsea_key, results = gsea_results, ranks = rank_table), checkpoint_gsea)
+  save(list = checkpoint_objects, file = checkpoint_file,
+       compress = "gzip", compression_level = 1, version = 3)
 }
 stopifnot(cfg$gsea_method %in% c("hybrid", "confidence", "impact"))
 gsea_kegg <- gsea_results[[paste0("KEGG_", cfg$gsea_method)]]
@@ -387,23 +402,8 @@ for (collection in names(pathways)) {
 }
 p_1C <- gsea_plots$KEGG
 p_1D <- gsea_plots$Hallmark
-```
 
-```{r gsea-kegg, fig.height=gsea_heights['KEGG'], fig.width=12}
-p_1C
-```
-
-```{r gsea-hallmark, fig.height=gsea_heights['Hallmark'], fig.width=12}
-p_1D
-```
-
-### Ranking comparison — Figures S4A–B
-
-The intersections below compare significant pathways across the three ranking
-strategies. A larger number of significant pathways does not, by itself, demonstrate
-greater accuracy of a ranking metric.
-
-```{r rank-comparison, fig.height=6}
+# 7. Figures S4A-B: comparison of gene-ranking metrics ------------------------
 rank_comparison <- bind_rows(gsea_results, .id = "analysis") |>
   tidyr::separate(analysis, into = c("collection", "metric"), sep = "_", extra = "merge")
 rank_comparison$leadingEdge <- vapply(rank_comparison$leadingEdge, paste, character(1), collapse = ";")
@@ -443,18 +443,8 @@ for (collection in names(pathways)) {
 }
 p_S4A <- upset_plots$KEGG
 p_S4B <- upset_plots$Hallmark
-p_S4A
-p_S4B
-```
 
-## 6. Figures 2A–B — CIBERSORTx
-
-The **provided CIBERSORTx output** is used without repeating the deconvolution or
-inferring its parameters from the CSV file. The six fractions sum to 1 in every sample.
-P values, correlation, and RMSE are preserved in Table S6. Samples are not filtered
-using these metrics. GMP is zero in every sample and is retained in the plots.
-
-```{r cibersort, fig.width=12, fig.height=6}
+# 8. Figures 2A-B: CIBERSORTx cell-state estimates ----------------------------
 cell_states <- names(cell_colors)
 stopifnot(all(rownames(col_data) %in% rownames(cibersort_raw)),
           !anyDuplicated(rownames(cibersort_raw)),
@@ -498,17 +488,8 @@ p_2B <- ggplot(ciber_summary, aes(CellState, mean, fill = Sampling_point)) +
        subtitle = "Bars: group means | Points: individual samples | Descriptive comparison",
        x = NULL, y = "Estimated proportion", fill = "Sampling point") +
   theme(legend.position = "bottom", axis.text.x = element_text(size = 11))
-p_2A
-p_2B
-```
 
-### Figure S5 — paired changes in progressors
-
-The main panel remains descriptive. Here, the paired Wilcoxon test compares post
-versus pre **only in the 12 progressors**. BH correction is applied to testable states;
-GMP has no variation and therefore has no P value. Non-progressors remain descriptive.
-
-```{r paired-cibersort, fig.height=7}
+# 9. Figure S5: paired CIBERSORTx changes -------------------------------------
 paired_ciber <- ciber_long |> filter(Progression_Group == "Progressor") |>
   select(Patient_ID, Condition, CellState, Proportion) |>
   pivot_wider(names_from = Condition, values_from = Proportion) |>
@@ -540,17 +521,8 @@ p_S5 <- ggplot(filter(ciber_long, Progression_Group == "Progressor"),
   labs(title = "Paired changes in estimated cell-state proportions",
        subtitle = "12 progressors | Wilcoxon signed-rank tests with BH adjustment",
        x = NULL, y = "Estimated proportion") + theme(legend.position = "none")
-p_S5
-knitr::kable(paired_tests, digits = 4)
-```
 
-## 7. Quality control and supplementary figures
-
-PCA: 500 most variable genes, using VST from the paired progressor object.
-t-SNE: all filtered genes, VST, perplexity 5, fixed seed. This panel is an
-exploratory visualisation of the data structure.
-
-```{r qc, fig.height=6}
+# 10. Figures S1A-B and S3: sample structure and library sizes ----------------
 vst_prog <- assay(vsd_prog)[, rownames(col_data_prog), drop = FALSE]
 top_var <- head(order(matrixStats::rowVars(vst_prog), decreasing = TRUE), 500)
 pca <- prcomp(t(vst_prog[top_var, , drop = FALSE]), center = TRUE, scale. = FALSE)
@@ -587,17 +559,10 @@ p_S3 <- ggplot(sample_qc, aes(reorder(sample, as.numeric(sub("Amostra_", "", sam
        x = "Sample", y = "Counts (millions)", fill = "Sampling point") +
   theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5, size = 8),
         legend.position = "bottom")
-p_S1A
-p_S1B
-p_S2
-p_S3
 write.csv(pca_df, "outputs/tables/PCA_coordinates.csv", row.names = FALSE)
 write.csv(tsne_df, "outputs/tables/tSNE_coordinates.csv", row.names = FALSE)
-```
 
-## 8. Exports and objects
-
-```{r export}
+# 11. Export all figures, tables, and named objects ---------------------------
 plots <- list(Figure_1A_volcano = p_1A, Figure_1B_biological_heatmap = p_1B,
               Figure_1C_GSEA_KEGG = p_1C, Figure_1D_GSEA_Hallmark = p_1D,
               Figure_2A_CIBERSORTx_stacked = p_2A, Figure_2B_CIBERSORTx_means = p_2B,
@@ -618,45 +583,43 @@ for (i in seq_along(plots)) {
   ggsave(paste0(stem, ".png"), plots[[i]], width = dimensions$width[i],
          height = dimensions$height[i], dpi = cfg$png_dpi, bg = "white", limitsize = FALSE)
 }
-saveRDS(plots, "checkpoints/03_plot_objects.rds")
-saveRDS(list(col_data = col_data, res_df = res_df, degs = degs,
-             hm_z = hm_z, all_deg_z = all_deg_z, module_membership = module_membership,
-             rank_table = rank_table, gsea_results = gsea_results,
-             ciber_long = ciber_long, ciber_summary = ciber_summary,
-             paired_tests = paired_tests, pca = pca, tsne = tsne,
-             cfg = cfg), "checkpoints/04_analysis_objects.rds")
+# One .rda file contains analysis data and individually named current-session plots.
+checkpoint_objects <- unique(c(checkpoint_objects,
+  "cfg", "runtime_key", "input_checksums", "package_versions", "col_data", "col_data_prog",
+  "sample_qc", "annotation", "annotation_audit", "filter_summary", "n_significant", "degs_symbols",
+  "group_colors", "cell_colors", "cell_states", "module_short", "module_colors",
+  "gaps_col", "gaps_row",
+  "gene_modules", "module_membership", "module_degs", "hm_z", "all_deg_z",
+  "annotation_col", "annotation_row", "ann_colors", "heat_colors", "hm_bio", "hm_all",
+  "volcano_df", "label_genes", "gsea_kegg", "gsea_hallmark", "rank_comparison",
+  "cibersort_table", "ciber_long", "ciber_summary", "paired_ciber", "paired_tests",
+  "vst_prog", "pca", "pca_df", "pca_var", "tsne", "tsne_df", "plots", "dimensions",
+  "p_1A", "p_1B", "p_1C", "p_1D", "p_2A", "p_2B", "p_S1A", "p_S1B", "p_S2",
+  "p_S3", "p_S4A", "p_S4B", "p_S5"))
+save(list = checkpoint_objects, file = checkpoint_file,
+     compress = "gzip", compression_level = 1, version = 3)
 write.csv(filter_summary, "outputs/tables/Filtering_summary.csv", row.names = FALSE)
 write.csv(dimensions, "outputs/reports/figure_manifest.csv", row.names = FALSE)
 capture.output(sessionInfo(), file = "outputs/reports/sessionInfo.txt")
-versions <- as.data.frame(installed.packages()[, c("Package", "Version", "LibPath")])
-write.csv(versions[, c("Package", "Version")], "outputs/reports/package_versions.csv", row.names = FALSE)
+write.csv(package_versions, "outputs/reports/package_versions.csv", row.names = FALSE)
 yaml::write_yaml(cfg, "outputs/reports/parameters_used.yml")
 input_paths <- list.files("inputs", recursive = TRUE, full.names = TRUE)
 write.csv(data.frame(file = input_paths, md5 = unname(tools::md5sum(input_paths))),
           "outputs/reports/input_checksums.csv", row.names = FALSE)
-```
 
-Main objects: `dds`, `res_df`, `degs`, `vst_matrix`, `hm_z`, `rank_table`,
-`gsea_results`, `ciber_long`, `paired_tests`, and `p_1A`-`p_2B`.
-To restore a session without recomputing:
+message("Finished. Figures and tables are in outputs/; objects are in ", checkpoint_file)
+rm(checkpoint_env)
 
-```{r restore-example, eval=FALSE}
-list2env(readRDS("checkpoints/01_DESeq2_VST.rds")$objects, envir = .GlobalEnv)
-list2env(readRDS("checkpoints/04_analysis_objects.rds"), envir = .GlobalEnv)
-# The plot checkpoint is generated when this document is rendered.
-plots <- readRDS("checkpoints/03_plot_objects.rds")
-plots$Figure_1A_volcano
-```
+# Explore or resize figures in RStudio using their named objects:
+# plot(p_1A)
+# plot(p_1B)
+# plot(p_2A)
+# ggplot2::ggsave("Figure_1B_resized.pdf", p_1B, width = 14, height = 15, units = "in")
+# Restore the objects in a later session in the same conda environment:
+# library(DESeq2)
+# library(ggplot2)
+# load("checkpoints/analysis_objects.rda")
+# plot(p_1A)
 
-## Technical references
-
-- Love et al. DESeq2: <https://doi.org/10.1186/s13059-014-0550-8>.
-- [DESeq2 — documentation and paired design](https://bioconductor.org/packages/release/bioc/vignettes/DESeq2/inst/doc/DESeq2.html).
-- [fgsea — documentation](https://bioconductor.org/packages/release/bioc/vignettes/fgsea/inst/doc/fgsea-tutorial.html).
-- [MSigDB — versioned gene-set collections](https://www.gsea-msigdb.org/gsea/msigdb/).
-- Newman et al. CIBERSORTx: <https://doi.org/10.1038/s41587-019-0114-2>.
-- Source data: De Castro et al., BJH 2024, <https://doi.org/10.1111/bjh.19107>.
-
-```{r session, echo=FALSE}
-sessionInfo()
-```
+# Optional: freeze the activated conda environment after a successful run.
+# conda env export | sed '/^prefix:/d' > environment.yml
