@@ -8,7 +8,7 @@ This repository contains a reproducible R workflow for paired bulk RNA-seq analy
 - The paired model is `~ Patient_ID + Condition`, with the post-progression sample contrasted against the pre-progression sample.
 - Genes are retained when they have at least 10 counts in at least six progressor samples.
 - Genes annotated on chromosomes X/Y are excluded. Genes without a gene-symbol annotation remain in the differential-expression analysis.
-- DESeq2 results are obtained with `alpha = 0.10` for independent filtering. Differentially expressed genes are selected using adjusted *P* < 0.05 and |log2 fold change| > 0.5.
+- Differentially expressed genes are selected using adjusted *P* < 0.05 and |log2 fold change| > 0.5.
 - Preranked GSEA uses MSigDB 7.5.1 KEGG and Hallmark gene sets and the documented hybrid ranking strategy.
 - Precomputed CIBERSORTx cell-state proportions are summarized across groups and tested within paired progressor samples.
 - First and second samples from five non-progressor patients are included as descriptive comparators in the heatmap and deconvolution analyses; they do not enter differential expression or GSEA.
@@ -24,56 +24,12 @@ This repository contains a reproducible R workflow for paired bulk RNA-seq analy
 | `environment.yml` | Exported conda environment with fixed dependency versions and builds for Linux x86_64. |
 | `MPN_sAML.Rproj` | RStudio project file, if using RStudio. |
 | `SUPPLEMENTARY_METHODS.md` | Detailed analytical methods and descriptions of supplementary results. |
-| `checkpoints/analysis_objects.rda` | One checkpoint containing named analysis and plotting objects. |
 | `outputs/figures/` | Figures 1A–D and 2A–B in PDF and PNG formats. |
 | `outputs/supplementary_figures/` | Figures S1A–B, S2, S3, S4A–B and S5 in PDF and PNG formats. |
 | `outputs/tables/` | Tables S1–S11, filtering summaries, gene rankings and PCA/t-SNE coordinates. |
 | `outputs/reports/` | Session information, installed package versions, parameters used, input checksums and figure dimensions. |
 
-Generated outputs and checkpoints should be excluded from version control through `.gitignore`.
-
-## Running the workflow
-
-Create and activate the environment, then run the script from the project root with the required data available locally:
-
-```bash
-conda env create -f environment.yml
-conda activate MPN_sAML
-Rscript --vanilla analysis.R
-```
-
-The exported environment targets Linux x86_64 and pins R, R packages and system dependencies. The script checks package availability; dependencies are installed through conda when creating the environment.
-
-For interactive use, configure RStudio to use the R installation in the `MPN_sAML` conda environment, open `MPN_sAML.Rproj` and run:
-
-```r
-source("analysis.R")
-```
-
-Parameters are defined in the `cfg` list at the beginning of `analysis.R`. To force recalculation, change `reuse_checkpoints = TRUE` to `reuse_checkpoints = FALSE` there before running.
-
-Checkpoint reuse checks the analysis inputs, relevant parameters, R version and installed package versions. Figures are rebuilt from the analysis data in the current session. The workflow exports figures, CSV tables and execution metadata.
-
-## Restoring objects and viewing figures
-
-After running `source("analysis.R")`, named objects are available in the R session. To restore them in a later session using the same conda environment:
-
-```r
-library(DESeq2)
-library(ggplot2)
-load("checkpoints/analysis_objects.rda")
-
-plot(p_1A)  # Volcano plot
-plot(p_1B)  # Biological-function heatmap
-plot(p_2A)  # CIBERSORTx stacked proportions
-```
-
-To export a figure with different dimensions:
-
-```r
-ggplot2::ggsave("Figure_1B_resized.pdf", p_1B,
-                width = 14, height = 15, units = "in")
-```
+Generated outputs are excluded from version control through `.gitignore`.
 
 ## Software and citations
 
